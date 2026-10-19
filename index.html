@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Expense Report</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: #202938;
+      background: #f4f7fb;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 40px 20px;
+    }
+
+    main {
+      padding: 32px;
+      border: 1px solid #dce3ed;
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: 0 8px 24px #1f355010;
+    }
+
+    h1 { margin: 0 0 8px; }
+    p { line-height: 1.55; }
+    .muted { color: #566276; }
+
+    .upload {
+      display: block;
+      margin: 24px 0 16px;
+      padding: 18px;
+      border: 1px dashed #8091aa;
+      border-radius: 8px;
+      background: #f8faff;
+    }
+
+    input, button { font: inherit; }
+    button {
+      padding: 9px 14px;
+      border: 0;
+      border-radius: 6px;
+      background: #185abd;
+      color: white;
+      cursor: pointer;
+    }
+    button:hover { background: #124995; }
+    button:focus-visible, input:focus-visible {
+      outline: 3px solid #91baff;
+      outline-offset: 2px;
+    }
+
+    #message {
+      margin: 18px 0;
+      padding: 12px 14px;
+      border-radius: 6px;
+    }
+    #message[hidden], #results[hidden] { display: none; }
+    #message.error { color: #8d1b16; background: #fff0ef; }
+    #message.success { color: #165c37; background: #eaf8ef; }
+
+    table {
+      width: 100%;
+      margin-top: 16px;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 11px 10px;
+      border-bottom: 1px solid #e4e9f0;
+      text-align: left;
+    }
+    th:last-child, td:last-child { text-align: right; }
+    tfoot { font-weight: 700; }
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #eef2f7;
+    }
+
+    @media (max-width: 520px) {
+      body { padding: 18px 12px; }
+      main { padding: 22px 17px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Expense Report</h1>
+    <p class="muted">
+      Select a CSV file with <code>date</code>, <code>category</code>, and
+      <code>amount</code> columns to see category totals. The file is processed
+      locally in your browser and is not uploaded.
+    </p>
+
+    <label class="upload" for="csv-file">
+      <strong>Choose an expense CSV</strong>
+      <p class="muted">Dates must be YYYY-MM-DD; amounts must be finite and non-negative.</p>
+      <input id="csv-file" type="file" accept=".csv,text/csv">
+    </label>
+
+    <div id="message" role="status" aria-live="polite" hidden></div>
+
+    <section id="results" aria-labelledby="results-heading" hidden>
+      <h2 id="results-heading">Summary</h2>
+      <p id="expense-count"></p>
+      <table>
+        <thead>
+          <tr><th scope="col">Category</th><th scope="col">Amount</th></tr>
+        </thead>
+        <tbody id="category-totals"></tbody>
+        <tfoot>
+          <tr><td>Grand total</td><td id="grand-total"></td></tr>
+        </tfoot>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    "use strict";
+
+    const fileInput = document.querySelector("#csv-file");
+    const message = document.querySelector("#message");
+    const results = document.querySelector("#results");
+
+    function parseCsv(text) {
+      const rows = [];
+      let row = [];
+      let field = "";
+      let quoted = false;
+
+      for (let index = 0; index < text.length; index += 1) {
+        const character = text[index];
+        if (quoted) {
+          if (character === '"') {
+            if (text[index + 1] === '"') {
+              field += '"';
+              index += 1;
+            } else {
+              quoted = false;
+            }
+          } else {
+            field += character;
+          }
+        } else if (character === '"' && field.length === 0) {
+          quoted = true;
+        } else if (character === ",") {
+          row.push(field);
+          field = "";
+        } else if (character === "\n" || character === "\r") {
+          row.push(field);
+          rows.push(row);
+          row = [];
+          field = "";
+          if (character === "\r" && text[index + 1] === "\n") index += 1;
+        } else {
+          field += character;
+        }
+      }
+
+      if (quoted) throw new Error("CSV contains an unterminated quoted field.");
+      if (field.length > 0 || row.length > 0) {
+        row.push(field);
+        rows.push(row);
+      }
+      return rows;
+    }
+
+    function parseDecimal(value, rowNumber) {
+      const text = value.trim();
+      const match = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text);
+      if (!match || (!match[2] && !match[3])) {
+        throw new Error(`Row ${rowNumber}: amount must be a decimal number.`);
+      }
+
+      const exponent = Number(match[4] || "0");
+      const digits = `${match[2] || "0"}${match[3] || ""}`.replace(/^0+(?=\d)/, "");
+      let scale = (match[3] || "").length - exponent;
+      if (!Number.isSafeInteger(exponent) || Math.abs(scale) > 10000 || digits.length > 10000) {
+        throw new Error(`Row ${rowNumber}: amount is too large to process in the browser.`);
+      }
+
+      let coefficient = BigInt(digits);
+      if (match[1] === "-") coefficient = -coefficient;
+      if (scale < 0) {
+        coefficient *= 10n ** BigInt(-scale);
+        scale = 0;
+      }
+      return { coefficient, scale };
+    }
+
+    function formatCents(coefficient, scale) {
+      const negative = coefficient < 0n;
+      const absolute = negative ? -coefficient : coefficient;
+      const divisor = 10n ** BigInt(scale);
+      const scaled = absolute * 100n;
+      let cents = scaled / divisor;
+      const remainder = scaled % divisor;
+      const doubledRemainder = remainder * 2n;
+      if (doubledRemainder > divisor || (doubledRemainder === divisor && cents % 2n === 1n)) {
+        cents += 1n;
+      }
+      const formatted = `${cents / 100n}.${String(cents % 100n).padStart(2, "0")}`;
+      return negative && cents !== 0n ? `-${formatted}` : formatted;
+    }
+
+    function summarizeCsv(text) {
+      const rows = parseCsv(text.replace(/^\uFEFF/, ""))
+        .filter((row) => !(row.length === 1 && row[0] === ""));
+      if (rows.length === 0 || rows[0].length === 1 && rows[0][0] === "") {
+        throw new Error("CSV file is missing a header row.");
+      }
+
+      const headers = rows[0];
+      const required = ["date", "category", "amount"];
+      const indexes = Object.fromEntries(required.map((name) => [name, headers.indexOf(name)]));
+      const missing = required.filter((name) => indexes[name] === -1);
+      if (missing.length) throw new Error(`CSV file is missing required column(s): ${missing.join(", ")}.`);
+
+      const totals = new Map();
+      let totalScale = 0;
+      let grandTotal = 0n;
+      let count = 0;
+
+      for (let index = 1; index < rows.length; index += 1) {
+        const fields = rows[index];
+        const rowNumber = index + 1;
+        const dateText = fields[indexes.date];
+        if (dateText === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(dateText)) {
+          throw new Error(`Row ${rowNumber}: date must use YYYY-MM-DD format.`);
+        }
+        const [year, month, day] = dateText.split("-").map(Number);
+        const parsedDate = new Date(0);
+        parsedDate.setUTCHours(0, 0, 0, 0);
+        parsedDate.setUTCFullYear(year, month - 1, day);
+        if (year < 1 || year > 9999 || parsedDate.getUTCFullYear() !== year ||
+            parsedDate.getUTCMonth() !== month - 1 || parsedDate.getUTCDate() !== day) {
+          throw new Error(`Row ${rowNumber}: date must use YYYY-MM-DD format.`);
+        }
+
+        const categoryValue = fields[indexes.category];
+        if (categoryValue === undefined) throw new Error(`Row ${rowNumber}: category must be text.`);
+        const category = categoryValue.trim();
+        if (!category) throw new Error(`Row ${rowNumber}: category cannot be empty.`);
+
+        const amountText = fields[indexes.amount];
+        if (amountText === undefined) throw new Error(`Row ${rowNumber}: amount must be a decimal number.`);
+        const amount = parseDecimal(amountText, rowNumber);
+        if (amount.coefficient < 0n) throw new Error(`Row ${rowNumber}: amount must be non-negative.`);
+
+        const categoryTotal = totals.get(category);
+        if (categoryTotal) {
+          const commonScale = Math.max(categoryTotal.scale, amount.scale);
+          categoryTotal.coefficient =
+            categoryTotal.coefficient * 10n ** BigInt(commonScale - categoryTotal.scale) +
+            amount.coefficient * 10n ** BigInt(commonScale - amount.scale);
+          categoryTotal.scale = commonScale;
+        } else {
+          totals.set(category, { coefficient: amount.coefficient, scale: amount.scale });
+        }
+
+        if (amount.scale > totalScale) {
+          grandTotal *= 10n ** BigInt(amount.scale - totalScale);
+          totalScale = amount.scale;
+        }
+        grandTotal += amount.coefficient * 10n ** BigInt(totalScale - amount.scale);
+        count += 1;
+      }
+
+      const orderedCategories = [...totals.keys()].sort((left, right) =>
+        left < right ? -1 : left > right ? 1 : 0);
+      const rowsHtml = orderedCategories.map((category) => {
+        const categoryTotal = totals.get(category);
+        const amount = formatCents(categoryTotal.coefficient, categoryTotal.scale);
+        return `<tr><td>${escapeHtml(category)}</td><td>${amount}</td></tr>`;
+      }).join("");
+
+      return {
+        count,
+        rowsHtml,
+        grandTotal: formatCents(grandTotal, totalScale),
+      };
+    }
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>"']/g, (character) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[character]);
+    }
+
+    function showError(error) {
+      results.hidden = true;
+      message.className = "error";
+      message.textContent = error.message;
+      message.hidden = false;
+    }
+
+    fileInput.addEventListener("change", async () => {
+      const [file] = fileInput.files;
+      if (!file) return;
+
+      try {
+        const summary = summarizeCsv(await file.text());
+        document.querySelector("#expense-count").textContent = `Expenses: ${summary.count}`;
+        document.querySelector("#category-totals").innerHTML = summary.rowsHtml;
+        document.querySelector("#grand-total").textContent = summary.grandTotal;
+        message.hidden = true;
+        results.hidden = false;
+      } catch (error) {
+        showError(error instanceof Error ? error : new Error("Unable to read the selected CSV file."));
+      }
+    });
+  </script>
+</body>
+</html>
